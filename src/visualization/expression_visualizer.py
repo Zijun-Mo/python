@@ -15,7 +15,7 @@ class ExpressionVisualizer(BaseVisualizer):
     """表情信息可视化器"""
     
     def draw(self, image: np.ndarray, expressions: Dict[str, float], 
-             target_expression: str, movement_ratios: Optional[Dict[str, float]] = None) -> np.ndarray:
+             target_expression: str, movement_ratios: Optional[Dict[str, float]] = None, synkinesis_scores: Optional[float] = None) -> np.ndarray:
         """在图像上只绘制指定的表情信息和对应的运动幅度比率"""
         h, w = image.shape[:2]
         
@@ -30,6 +30,8 @@ class ExpressionVisualizer(BaseVisualizer):
         items_to_show = 2  # 目标表情 + 中性状态
         if movement_ratios:
             items_to_show += 2  # 标题 + 对应的运动比率
+        if synkinesis_scores:
+            items_to_show += 2  # 标题 + 联动运动幅度
         box_height = 30 * items_to_show + 20
         
         # 创建背景矩形
@@ -62,10 +64,39 @@ class ExpressionVisualizer(BaseVisualizer):
         # 绘制对应的运动幅度比率
         if movement_ratios:
             y_offset = self.__draw_specific_movement_ratio(draw, movement_ratios, target_expression, y_offset, font, small_font)
-        
+            y_offset += 5  # 添加额外的间距
+        # 绘制联动运动幅度分数（0~3分，用条形图和数值）
+        if synkinesis_scores is not None:
+            y_offset = self.__draw_synkinesis_score(draw, synkinesis_scores, y_offset, font, small_font)
+            y_offset += 5
+
         # 转换回OpenCV格式
         result_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
         return result_image
+
+    def __draw_synkinesis_score(self, draw, synkinesis_scores, y_offset, font, small_font):
+        """绘制联动运动幅度分数（0~3分）"""
+        draw.text((20, y_offset), "联动运动幅度:", font=font, fill=(255, 255, 255))
+        y_offset += 25
+        score = float(synkinesis_scores)
+        # 颜色：0分灰色，1分绿色，2分黄色，3分红色
+        if score >= 3:
+            color = (255, 0, 0)      # 红色
+        elif score >= 2:
+            color = (255, 255, 0)    # 黄色
+        elif score >= 1:
+            color = (0, 255, 0)      # 绿色
+        else:
+            color = (180, 180, 180)  # 灰色
+        # 绘制分数文本
+        draw.text((30, y_offset), f"分数: {score:.1f} / 3", font=small_font, fill=color)
+        # 绘制分数条
+        bar_width = int(50 * score)  # 0~3分，最大150像素
+        if bar_width > 0:
+            draw.rectangle([(120, y_offset + 2), (120 + bar_width, y_offset + 12)], fill=color)
+        draw.rectangle([(120, y_offset + 2), (120 + 150, y_offset + 12)], outline=color, width=1)
+        y_offset += 25
+        return y_offset
     
     def __get_expression_color(self, expr_name: str, value: float) -> Tuple[int, int, int]:
         """获取表情的显示颜色"""

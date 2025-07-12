@@ -2,6 +2,8 @@
 面部表情分析系统 - 主入口文件
 整合所有模块，提供统一的入口点
 """
+import matplotlib
+matplotlib.use('Agg')
 
 import logging
 from video.batch_processor import BatchProcessor

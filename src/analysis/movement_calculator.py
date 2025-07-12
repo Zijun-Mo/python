@@ -73,36 +73,47 @@ class MovementCalculator:
             "pucker": []
         }
     
-    def calculate_facial_movement_ratios(self, rest_landmarks, move_landmarks, visible_threshold: float = Config.VISIBLE_THRESHOLD, correct_orientation: bool = True) -> Dict[str, float]:
+    def calculate_facial_movement_ratios(self, rest_landmarks, move_landmarks, visible_threshold: float = Config.VISIBLE_THRESHOLD) -> Dict[str, float]:
         """计算五项运动幅度比率"""
         results = {}
         
-        # 如果启用朝向校正，先校正面部朝向
-        if correct_orientation:
-            rest_rpy = self.landmark_processor.detect_face_orientation(rest_landmarks)
-            move_rpy = self.landmark_processor.detect_face_orientation(move_landmarks)
-            corrected_rest_landmarks = self.landmark_processor.correct_face_orientation(rest_landmarks, rest_rpy)
-            corrected_move_landmarks = self.landmark_processor.correct_face_orientation(move_landmarks, move_rpy)
-            
-            # 再进行landmarks对齐
-            aligned_move_landmarks = self.landmark_processor.align_landmarks(corrected_move_landmarks, corrected_rest_landmarks)
-            rest_landmarks = corrected_rest_landmarks
-        else:
-            # 直接对landmarks进行对齐
-            aligned_move_landmarks = self.landmark_processor.align_landmarks(move_landmarks, rest_landmarks)
+        def fit_plane_and_dist(landmarks, indices, point=None):
+            # indices: 用于拟合平面的点索引
+            # point: 需要计算到平面距离的点（3D坐标），若为None则默认用indices[0]
+            pts = np.array([self.landmark_processor.get_3D_point(landmarks, idx) for idx in indices])
+            centroid = np.mean(pts, axis=0)
+            _, _, vh = np.linalg.svd(pts - centroid)
+            normal = vh[-1]
+            A, B, C = normal
+            D = -np.dot(normal, centroid)
+            p = np.array(point)
+            dist = abs(A*p[0] + B*p[1] + C*p[2] + D) / np.linalg.norm(normal)
+            return dist
+        def fit_line_and_dist(landmarks, indices, point=None):
+            # indices: 用于拟合直线的点索引（可多个点）
+            pts = np.array([self.landmark_processor.get_3D_point(landmarks, idx) for idx in indices])
+            p = np.array(point)
+            # 最小二乘法拟合直线：求主方向
+            centroid = np.mean(pts, axis=0)
+            uu, dd, vv = np.linalg.svd(pts - centroid)
+            direction = vv[0]  # 主方向向量
+            # 点到直线距离
+            dist = np.linalg.norm(np.cross(direction, p - centroid)) / np.linalg.norm(direction)
+            return dist
+        rest_rpy = self.landmark_processor.detect_face_orientation(rest_landmarks)
+        move_rpy = self.landmark_processor.detect_face_orientation(move_landmarks)
+        rest_landmarks = self.landmark_processor.correct_face_orientation(rest_landmarks, rest_rpy)
+        move_landmarks = self.landmark_processor.correct_face_orientation(move_landmarks, move_rpy)
         
-        # 1. 抬眉毛：眉毛中点上下方向移动
-        left_brow_rest = (self.landmark_processor.get_point(rest_landmarks, 105) + 
-                         self.landmark_processor.get_point(rest_landmarks, 52)) / 2
-        left_brow_move = (self.landmark_processor.get_point(aligned_move_landmarks, 105) + 
-                         self.landmark_processor.get_point(aligned_move_landmarks, 52)) / 2
-        right_brow_rest = (self.landmark_processor.get_point(rest_landmarks, 334) + 
-                          self.landmark_processor.get_point(rest_landmarks, 282)) / 2
-        right_brow_move = (self.landmark_processor.get_point(aligned_move_landmarks, 334) + 
-                          self.landmark_processor.get_point(aligned_move_landmarks, 282)) / 2
-        
-        left_l = abs(left_brow_move[1] - left_brow_rest[1])
-        right_l = abs(right_brow_move[1] - right_brow_rest[1])
+        # 1. 抬眉毛：眉毛中点到四个眼角所在的距离
+        # 眼角索引：左眼[33, 133]，右眼[362, 263]
+        eye_line = [33, 133, 362, 263]
+        left_brow_rest = (self.landmark_processor.get_3D_point(rest_landmarks, 105) + self.landmark_processor.get_3D_point(rest_landmarks, 52)) / 2
+        left_brow_move = (self.landmark_processor.get_3D_point(move_landmarks, 105) + self.landmark_processor.get_3D_point(move_landmarks, 52)) / 2
+        right_brow_rest = (self.landmark_processor.get_3D_point(rest_landmarks, 334) + self.landmark_processor.get_3D_point(rest_landmarks, 282)) / 2
+        right_brow_move = (self.landmark_processor.get_3D_point(move_landmarks, 334) + self.landmark_processor.get_3D_point(move_landmarks, 282)) / 2
+        left_l = fit_line_and_dist(move_landmarks, eye_line, left_brow_move) - fit_line_and_dist(rest_landmarks, eye_line, left_brow_rest)
+        right_l = fit_line_and_dist(move_landmarks, eye_line, right_brow_move) - fit_line_and_dist(rest_landmarks, eye_line, right_brow_rest)
         small_l = min(left_l, right_l)
         large_l = max(left_l, right_l)
         results["raise_eyebrow"] = small_l / large_l if large_l > visible_threshold else 0.0
@@ -112,14 +123,14 @@ class MovementCalculator:
             self.landmark_processor.get_point(rest_landmarks, 159),
             self.landmark_processor.get_point(rest_landmarks, 145))
         left_eye_move = self.landmark_processor.calc_distance(
-            self.landmark_processor.get_point(aligned_move_landmarks, 159),
-            self.landmark_processor.get_point(aligned_move_landmarks, 145))
+            self.landmark_processor.get_point(move_landmarks, 159),
+            self.landmark_processor.get_point(move_landmarks, 145))
         right_eye_rest = self.landmark_processor.calc_distance(
             self.landmark_processor.get_point(rest_landmarks, 374),
             self.landmark_processor.get_point(rest_landmarks, 386))
         right_eye_move = self.landmark_processor.calc_distance(
-            self.landmark_processor.get_point(aligned_move_landmarks, 374),
-            self.landmark_processor.get_point(aligned_move_landmarks, 386))
+            self.landmark_processor.get_point(move_landmarks, 374),
+            self.landmark_processor.get_point(move_landmarks, 386))
         left_l = left_eye_rest - left_eye_move
         right_l = right_eye_rest - right_eye_move
         small_l = min(left_l, right_l)
@@ -131,14 +142,14 @@ class MovementCalculator:
             self.landmark_processor.get_point(rest_landmarks, 133), 
             self.landmark_processor.get_point(rest_landmarks, 126))
         left_move = self.landmark_processor.calc_distance(
-            self.landmark_processor.get_point(aligned_move_landmarks, 133), 
-            self.landmark_processor.get_point(aligned_move_landmarks, 126))
+            self.landmark_processor.get_point(move_landmarks, 133), 
+            self.landmark_processor.get_point(move_landmarks, 126))
         right_rest = self.landmark_processor.calc_distance(
             self.landmark_processor.get_point(rest_landmarks, 362), 
             self.landmark_processor.get_point(rest_landmarks, 355))
         right_move = self.landmark_processor.calc_distance(
-            self.landmark_processor.get_point(aligned_move_landmarks, 362), 
-            self.landmark_processor.get_point(aligned_move_landmarks, 355))
+            self.landmark_processor.get_point(move_landmarks, 362), 
+            self.landmark_processor.get_point(move_landmarks, 355))
         
         left_l = left_rest - left_move
         right_l = right_rest - right_move
@@ -147,10 +158,11 @@ class MovementCalculator:
         results["sneer"] = small_l / large_l if large_l > visible_threshold else 0.0
         
         # 4. 咧嘴笑：口角横向移动
-        left_rest = self.landmark_processor.get_point(rest_landmarks, 61)[0]
-        left_move = self.landmark_processor.get_point(aligned_move_landmarks, 61)[0]
-        right_rest = self.landmark_processor.get_point(rest_landmarks, 291)[0]
-        right_move = self.landmark_processor.get_point(aligned_move_landmarks, 291)[0]
+        midline_indices = [0] + list(range(11, 18))  # 嘴唇中线点索引
+        left_rest = fit_plane_and_dist(rest_landmarks, midline_indices, self.landmark_processor.get_3D_point(rest_landmarks, 61))
+        left_move = fit_plane_and_dist(move_landmarks, midline_indices, self.landmark_processor.get_3D_point(move_landmarks, 61))
+        right_rest = fit_plane_and_dist(rest_landmarks, midline_indices, self.landmark_processor.get_3D_point(rest_landmarks, 291))
+        right_move = fit_plane_and_dist(move_landmarks, midline_indices, self.landmark_processor.get_3D_point(move_landmarks, 291))
         
         left_l = abs(left_move - left_rest)
         right_l = abs(right_move - right_rest)
@@ -159,32 +171,6 @@ class MovementCalculator:
         results["smile"] = small_l / large_l if large_l > visible_threshold else 0.0
         
         # 5. 撅嘴：嘴角到嘴唇中线（0, 11~17）拟合直线的垂直距离
-        midline_indices = [0] + list(range(11, 18))  # 嘴唇中线点索引
-        def fit_plane_and_dist(landmarks, corner_idx):
-            # 拟合中线点
-            pts = np.array([self.landmark_processor.get_3D_point(landmarks, idx) for idx in midline_indices])
-            centroid = np.mean(pts, axis=0)
-            # SVD求法向量
-            _, _, vh = np.linalg.svd(pts - centroid)
-            normal = vh[-1]  # 平面法向量
-            # 平面方程: normal[0]*(x-x0) + normal[1]*(y-y0) + normal[2]*(z-z0) = 0
-            # 即: A(x-x0)+B(y-y0)+C(z-z0)=0
-            # 化为: Ax+By+Cz+D=0, D=-(A*x0+B*y0+C*z0)
-            A, B, C = normal
-            D = -np.dot(normal, centroid)
-            # 嘴角点
-            p = np.array(self.landmark_processor.get_3D_point(landmarks, corner_idx))
-            dist = abs(A*p[0] + B*p[1] + C*p[2] + D) / np.linalg.norm(normal)
-            return dist
-        left_rest = fit_plane_and_dist(rest_landmarks, 61)
-        left_move = fit_plane_and_dist(aligned_move_landmarks, 61)
-        right_rest = fit_plane_and_dist(rest_landmarks, 291)
-        right_move = fit_plane_and_dist(aligned_move_landmarks, 291)
-        print(f"Left rest: {left_rest}, Left move: {left_move}, Right rest: {right_rest}, Right move: {right_move}")
-        left_l = left_rest - left_move
-        right_l = right_rest - right_move
-        small_l = min(left_l, right_l)
-        large_l = max(left_l, right_l)
         results["pucker"] = small_l / large_l if large_l > visible_threshold else 0.0
         
         return results

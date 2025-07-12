@@ -15,6 +15,8 @@ from config import Config
 
 from analysis.movement_calculator import MovementCalculator
 from analysis.facial_analysis_engine import FacialAnalysisEngine
+from analysis.synkinesis_calculator import SynkinesisCalculator
+from analysis.statistic_analysis import statistic_analysis
 
 
 class VideoProcessor:
@@ -23,7 +25,9 @@ class VideoProcessor:
     def __init__(self, model_path: str):
         self.model_path = model_path        
         self.movement_calculator = MovementCalculator()
-        self.analysis_engine = FacialAnalysisEngine(self.movement_calculator)
+        self.synkinesis_calculator = SynkinesisCalculator()
+        self.statistic_analysis = statistic_analysis()
+        self.analysis_engine = FacialAnalysisEngine(self.movement_calculator, self.synkinesis_calculator)
         self._init_mediapipe()
         # 表情名称映射
         self.expression_keys = ['抬眉', '闭眼', '皱鼻', '咧嘴笑', '撅嘴']
@@ -66,10 +70,27 @@ class VideoProcessor:
             print(f"视频 {video_name} 处理完成！")
             print(f"输出目录: {video_output_dir}")
             
-            summery = self.analysis_engine.movement_calculator.get_movement_summary()
+            summery = self.movement_calculator.get_movement_summary()
             print(f"运动幅度对称性总结: {summery}")
-            self.analysis_engine.movement_calculator.clear_movement_history()
+            summery_synkinesis = self.synkinesis_calculator.get_movement_summary()
+            print(f"联动运动幅度总结: {summery_synkinesis}")
             
+            # 保存评分结果到文件
+            scores_summary = {
+                '运动幅度对称性评分': summery.get('symmetry_scores', {}),
+                '联动运动评分': summery_synkinesis.get('symmetry_scores', {}),
+                '法令纹对称度': getattr(self, '_nasolabial_score', 0),
+                '嘴唇对称度': getattr(self, '_lip_score', 0),
+                '眼裂宽度对称度': getattr(self, '_eye_score', 0)
+            }
+            
+            scores_file = video_output_dir / f"{video_name}_scores.json"
+            with open(scores_file, 'w', encoding='utf-8') as f:
+                json.dump(scores_summary, f, indent=2, ensure_ascii=False)
+            print(f"评分结果已保存: {scores_file}")
+            
+            self.movement_calculator.clear_movement_history()
+            self.synkinesis_calculator.clear_movement_history()
             return True
             
         except Exception as e:
@@ -78,8 +99,26 @@ class VideoProcessor:
     
     def _analyze_video_for_peaks(self, video_path: str):
         """分析整个视频，找到基准帧和表情峰值帧"""
-        # Pass 1: Find the baseline frame by analyzing neutral expression
-        print("第一阶段-A：初步分析视频，寻找基准帧（前三秒内变化率最小）...")
+        # 阶段一：通过分析中性表情找到基准帧
+        print("第一阶段-A：初步分析视频，寻找基准帧...")
+
+        # 加载动作时间戳
+        video_name = Path(video_path).stem
+        json_path = Path(video_path).parent / f"{video_name}_action_timestamps.json"
+        if not json_path.exists():
+            logging.error(f"时间戳文件未找到: {json_path}")
+            return None, None
+        with open(json_path, 'r', encoding='utf-8') as f:
+            action_timestamps = json.load(f)['actions']
+
+        # 将JSON中的表情键映射到代码中的表情键
+        expression_mapping = {
+            'eyebrow_raise': '抬眉',
+            'eye_close': '闭眼',
+            'nose_scrunch': '皱鼻',
+            'smile': '咧嘴笑',
+            'lip_pucker': '撅嘴',
+        }
         
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -98,7 +137,6 @@ class VideoProcessor:
         
         first_pass_data = []
         frame_count = 0
-        max_time = 3.0  # 只取前三秒
         
         with self.FaceLandmarker.create_from_options(options) as landmarker:
             while cap.isOpened():
@@ -113,17 +151,25 @@ class VideoProcessor:
                 detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
                 
                 if detection_result.face_blendshapes and detection_result.face_landmarks:
-                    expressions = self.analysis_engine.expression_analyzer.analyze_expressions(detection_result)
-                    current_frame_info = {
-                        'frame_number': frame_count,
-                        'timestamp_ms': timestamp_ms,
-                        'timestamp_s': timestamp_s,
-                        'frame': frame.copy(),
-                        'rgb_frame': rgb_frame.copy(),
-                        'detection_result': detection_result,
-                        'expressions': expressions
-                    }
-                    first_pass_data.append(current_frame_info)
+                    # 检查当前帧是否在任何一个动作的时间范围内
+                    in_action_range = False
+                    for action in action_timestamps.values():
+                        if action['start_time'] <= timestamp_s <= action['end_time']:
+                            in_action_range = True
+                            break
+                    
+                    if in_action_range:
+                        expressions = self.analysis_engine.expression_analyzer.analyze_expressions(detection_result)
+                        current_frame_info = {
+                            'frame_number': frame_count,
+                            'timestamp_ms': timestamp_ms,
+                            'timestamp_s': timestamp_s,
+                            'frame': frame.copy(),
+                            'rgb_frame': rgb_frame.copy(),
+                            'detection_result': detection_result,
+                            'expressions': expressions
+                        }
+                        first_pass_data.append(current_frame_info)
                 
                 frame_count += 1
                 if frame_count % 100 == 0:
@@ -132,12 +178,25 @@ class VideoProcessor:
         cap.release()
 
         if not first_pass_data:
-            logging.error("前三秒内未能找到任何有效的帧来确定基准帧。")
+            logging.error("在指定的时间戳范围内未能找到任何有效的帧。")
+            return None, None
+
+        # 在 neutral 时间范围内寻找基准帧
+        neutral_start_time = action_timestamps['neutral']['start_time']
+        neutral_end_time = action_timestamps['neutral']['end_time']
+        
+        neutral_frames_data = [
+            f for f in first_pass_data 
+            if neutral_start_time <= f['timestamp_s'] <= neutral_end_time
+        ]
+
+        if not neutral_frames_data:
+            logging.error("在中性表情时间范围内未找到任何帧。")
             return None, None
 
         # 计算每帧的中性状态
-        neutral_values = [f['expressions']['中性状态'] for f in first_pass_data]
-        timestamps = [f['timestamp_s'] for f in first_pass_data]
+        neutral_values = [f['expressions']['中性状态'] for f in neutral_frames_data]
+        timestamps = [f['timestamp_s'] for f in neutral_frames_data]
         # 计算变化率（绝对值）
         neutral_deltas = [0.0]
         for i in range(1, len(neutral_values)):
@@ -159,22 +218,21 @@ class VideoProcessor:
         for i in range(len(neutral_deltas)):
             l = max(0, i - window_size)
             r = min(len(neutral_deltas)-1, i + window_size)
-            if r >= max_time * fps:
-                break
             count = r - l + 1
             avg = (prefix_sum[r+1] - prefix_sum[l]) / count
             if avg < min_avg:
                 min_avg = avg
                 min_idx = i
-        baseline_frame_info = first_pass_data[min_idx]
+        
+        baseline_frame_info = neutral_frames_data[min_idx].copy()
         print(f"基准帧已找到: 帧号 {baseline_frame_info['frame_number']} (中性值: {baseline_frame_info['expressions']['中性状态']:.3f}, 变化率窗口均值: {min_avg:.5f})")
         
-        # Pass 2: Re-calculate expressions with reference landmarks and find peaks
+        # 阶段二：使用基准帧地标重新计算表情并找到峰值
         print("第一阶段-B：使用基准帧重新分析表情并寻找峰值...")
         reference_landmarks = baseline_frame_info['detection_result'].face_landmarks[0]
         
         final_frame_data = []
-        expression_peaks = {expr: {'max_value': 0.0, 'frames': []} for expr in self.expression_keys}
+        expression_peaks = {expr: {'max_value': 0.0, 'frames': [], 'frameID': 0} for expr in self.expression_keys}
 
         for frame_info in first_pass_data:
             reanalyzed_expressions = self.analysis_engine.expression_analyzer.analyze_expressions(
@@ -182,34 +240,43 @@ class VideoProcessor:
                 reference_landmarks=reference_landmarks
             )
             
-            # Update frame_info with the new expressions and clean up
+            # 使用新的表情更新帧信息并进行清理
             frame_info['expressions'] = reanalyzed_expressions
             frame_info['landmarks'] = frame_info['detection_result'].face_landmarks[0]
+            frame_info['blendshapes'] = frame_info['detection_result'].face_blendshapes[0]
             del frame_info['detection_result']
             
             final_frame_data.append(frame_info)
             
-            # Update expression peaks with the new values
-            for expr_key in self.expression_keys:
-                expr_value = reanalyzed_expressions[expr_key]
-                if expr_value > expression_peaks[expr_key]['max_value']:
-                    expression_peaks[expr_key]['max_value'] = expr_value
+        # 使用新值更新表情峰值
+        for json_key, expr_key in expression_mapping.items():
+            if json_key in action_timestamps:
+                time_range = action_timestamps[json_key]
+                for frame_info in final_frame_data:
+                    if time_range['start_time'] <= frame_info['timestamp_s'] <= time_range['end_time']:
+                        expr_value = frame_info['expressions'][expr_key]
+                        if expr_value > expression_peaks[expr_key]['max_value']:
+                            expression_peaks[expr_key]['max_value'] = expr_value
+                            expression_peaks[expr_key]['frameID'] = frame_info['frame_number']
         
-        # Find all frames that are within 90% of the peak for each expression
+        # 找到每个表情峰值90%范围内的所有帧
         print("寻找表情峰值90%的帧...")
-        for expr_key in self.expression_keys:
-            peak_value = expression_peaks[expr_key]['max_value']
-            threshold_90 = peak_value * Config.PEAK_THRESHOLD
-            
-            print(f"{expr_key}: 峰值={peak_value:.3f}, 90%阈值={threshold_90:.3f}")
-            
-            qualifying_frames = []
-            for frame_info in final_frame_data:
-                if frame_info['expressions'][expr_key] >= threshold_90:
-                    qualifying_frames.append(frame_info)
-            
-            expression_peaks[expr_key]['frames'] = qualifying_frames
-            print(f"找到{len(qualifying_frames)}帧达到{expr_key}的90%峰值")
+        for json_key, expr_key in expression_mapping.items():
+            if json_key in action_timestamps:
+                peak_value = expression_peaks[expr_key]['max_value']
+                threshold_90 = peak_value * Config.PEAK_THRESHOLD
+
+                print(f"{expr_key}: 帧号 = {expression_peaks[expr_key]['frameID']}, 峰值={peak_value:.3f}, 90%阈值={threshold_90:.3f}")
+
+                time_range = action_timestamps[json_key]
+                qualifying_frames = []
+                for frame_info in final_frame_data:
+                    if (time_range['start_time'] <= frame_info['timestamp_s'] <= time_range['end_time'] and
+                            frame_info['expressions'][expr_key] >= threshold_90):
+                        qualifying_frames.append(frame_info)
+                
+                expression_peaks[expr_key]['frames'] = qualifying_frames
+                print(f"找到{len(qualifying_frames)}帧达到{expr_key}的90%峰值")
         
         return baseline_frame_info, expression_peaks
     
@@ -217,6 +284,21 @@ class VideoProcessor:
         """保存基准图和表情图片"""
         print("第二阶段：保存基准图和表情图片...")
         video_annotated_frames = {}
+        # 计算法令纹长度
+        nasolabial_score = self.statistic_analysis.extract_nasolabial_rank(
+            baseline_frame['detection_result'].face_landmarks[0], baseline_frame['frame'])
+        print(f"法令纹对称度: {nasolabial_score}")
+        self._nasolabial_score = nasolabial_score
+        
+        lip_score = self.statistic_analysis.extract_lip_midline_diff_rank(
+            baseline_frame['detection_result'].face_landmarks[0], baseline_frame['frame'])
+        print(f"嘴唇对称度: {lip_score}")
+        self._lip_score = lip_score
+        
+        eye_score = self.statistic_analysis.extract_palpebral_fissure_width_rank(
+            baseline_frame['detection_result'].face_landmarks[0], baseline_frame['frame'])
+        print(f"眼裂宽度对称度: {eye_score}")
+        self._eye_score = eye_score
         
         # 保存基准图
         baseline_path = video_output_dir / f"{video_name}_baseline.jpg"
@@ -236,7 +318,7 @@ class VideoProcessor:
             logging.error(f"无法保存基准图: {baseline_path}, 错误: {e}")
         
         print(f"基准图中性值: {baseline_frame['expressions']['中性状态']:.3e}")
-        
+
         # 为每个表情创建目录并保存图片
         for expr_key in self.expression_keys:
             expr_frames = expression_peaks[expr_key]['frames']
@@ -252,33 +334,24 @@ class VideoProcessor:
             for i, frame_info in enumerate(expr_frames):
                 # 计算运动幅度对称性
                 movement_ratios = self.analysis_engine.movement_calculator.calculate_facial_movement_ratios(
-                    baseline_frame['landmarks'], frame_info['landmarks'])
+                    baseline_frame['detection_result'].face_landmarks[0], frame_info['landmarks'])
                 
                 # 处理帧以添加标注
-                # 创建模拟的detection_result对象
-                class MockBlendshape:
-                    def __init__(self, category_name, score):
-                        self.category_name = category_name
-                        self.score = score
-
-                mock_blendshapes = []
-                for k, v in self._convert_expressions_to_blendshapes(frame_info['expressions']).items():
-                    mock_blendshapes.append(MockBlendshape(k, v))
-
-                class MockDetectionResult:
+                class DetectionResult:
                     def __init__(self, landmarks, blendshapes):
                         self.face_landmarks = [landmarks]
                         self.face_blendshapes = [blendshapes]
-                
-                mock_detection_result = MockDetectionResult(frame_info['landmarks'], mock_blendshapes)
+
+                detection_result = DetectionResult(frame_info['landmarks'], frame_info['blendshapes'])
                 
                 # 使用特定表情处理方法，只标注当前表情
                 annotated_frame, _ = self.analysis_engine.process_frame_for_specific_expression(
                     frame_info['rgb_frame'], 
-                    mock_detection_result,
+                    detection_result,
                     expr_key,  # 传入当前表情名称
-                    baseline_frame['landmarks'])
-                
+                    baseline_frame['detection_result']
+                )
+
                 # 为视频准备已标注的帧
                 frame_number = frame_info['frame_number']
                 current_value = frame_info['expressions'][expr_key]

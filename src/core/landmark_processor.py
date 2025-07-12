@@ -84,11 +84,10 @@ class LandmarkProcessor:
                             points.append([x, y, z])
                 return np.array(points)
 
-            # 默认稳定点集（鼻梁、眉心、两眼内外眦）
             if stable_indices is None:
                 stable_indices = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 
                                   397, 365, 379, 378, 400, 277, 152, 148, 176, 149, 150, 136, 
-                                  172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+                                  172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109, ]
 
             source_points = extract_points_3d(source_landmarks, stable_indices)
             target_points = extract_points_3d(target_landmarks, stable_indices)

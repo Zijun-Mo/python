@@ -25,9 +25,9 @@ class BatchProcessor:
           # 查找所有视频文件（避免重复）
         video_files = set()  # 使用set避免重复
         for ext in self.video_extensions:
-            # 同时搜索小写和大写扩展名
-            video_files.update(input_path.glob(f"*{ext}"))
-            video_files.update(input_path.glob(f"*{ext.upper()}"))
+            # 同时递归搜索小写和大写扩展名
+            video_files.update(input_path.glob(f"**/*{ext}"))
+            video_files.update(input_path.glob(f"**/*{ext.upper()}"))
         
         video_files = list(video_files)  # 转换回list
         

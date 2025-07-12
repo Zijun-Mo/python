@@ -24,7 +24,7 @@ class Config:
     EXPRESSION_KEYS = ['抬眉', '闭眼', '皱鼻', '咧嘴笑', '撅嘴']
     
     # 处理参数
-    VISIBLE_THRESHOLD = 0.005
+    VISIBLE_THRESHOLD = 0.001
     PEAK_THRESHOLD = 0.9  # 峰值的90%作为阈值
     
     # 日志配置
